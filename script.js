@@ -510,6 +510,7 @@ window.saveEntry = async function () {
   } catch (err) {
     console.error("Save entry error:", err);
     alert("Failed to save entry. Please try again.");
+    await ensureImagesDisplayed(entriesE1);
   }
 };
 
