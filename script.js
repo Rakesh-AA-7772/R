@@ -1125,4 +1125,127 @@ if (!isStorageAvailable) {
   // final note
   console.log("Add-on: multi-device image support initialized (append-only).");
 })();
+/* =========================
+  ADD-ON: Ensure entry images display (append-only)
+  - No existing functions are modified.
+  - Add this at the end of script.js.
+  ========================= */
+
+async function tryResolveStorageUrl(maybeUrlOrPath) {
+  // dynamic import so we don't change existing imports
+  try {
+    const storageMod = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js");
+    const storage = storageMod.getStorage();
+
+    // if already an http(s) URL, return it unchanged
+    if (/^https?:\/\//i.test(maybeUrlOrPath)) return maybeUrlOrPath;
+
+    // if it's a gs:// URL, use refFromURL
+    if (/^gs:\/\//i.test(maybeUrlOrPath)) {
+      try {
+        const ref = storageMod.refFromURL(storage, maybeUrlOrPath);
+        return await storageMod.getDownloadURL(ref);
+      } catch (e) {
+        console.warn("tryResolveStorageUrl: refFromURL failed", e);
+      }
+    }
+
+    // treat as a path under the bucket (like "users/UID/entries/ID/file.jpg")
+    try {
+      const ref = storageMod.ref(storage, maybeUrlOrPath);
+      return await storageMod.getDownloadURL(ref);
+    } catch (e) {
+      console.warn("tryResolveStorageUrl: ref(path) failed", e);
+    }
+
+  } catch (err) {
+    console.warn("tryResolveStorageUrl: storage module import failed", err);
+  }
+  return null;
+}
+
+// Walk newly rendered entries in container and ensure images load. If a URL fails, try to resolve via Storage.
+async function ensureImagesDisplayed(containerEl = null) {
+  try {
+    const container = containerEl || document.getElementById("entries");
+    if (!container) return;
+
+    // find each card's images-block and attempt to validate/load each image
+    const entryCards = Array.from(container.querySelectorAll(".entry-card"));
+    for (const card of entryCards) {
+      // log images field if present on the card element dataset (for debugging)
+      // Note: this logs whatever the server returned when rendering; keep for debugging
+      const imgs = Array.from(card.querySelectorAll(".entry-images img"));
+      for (const imgEl of imgs) {
+        // if image already loaded OK, skip
+        if (imgEl.complete && imgEl.naturalWidth > 0) continue;
+
+        const src = imgEl.getAttribute("src") || "";
+        console.log("ensureImagesDisplayed: checking img src:", src);
+
+        // attach onload/onerror handlers to show fallback / debug
+        imgEl.onload = () => {
+          imgEl.classList.remove("image-loading");
+          imgEl.classList.add("image-loaded");
+        };
+        imgEl.onerror = async () => {
+          console.warn("ensureImagesDisplayed: image failed to load:", src);
+
+          // Try resolving via storage rules if the src looks like a storage path or gs:// or not http
+          const resolved = await tryResolveStorageUrl(src);
+          if (resolved) {
+            console.log("ensureImagesDisplayed: resolved storage url ->", resolved);
+            imgEl.src = resolved; // retry with resolved url
+            return;
+          }
+
+          // final fallback: replace with a small inline placeholder so UI isn't empty
+          imgEl.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(
+            `<svg xmlns='http://www.w3.org/2000/svg' width='300' height='180'>
+               <rect width='100%' height='100%' fill='#111827'/>
+               <text x='50%' y='50%' fill='#94A3B8' font-size='14' dominant-baseline='middle' text-anchor='middle'>Image unavailable</text>
+             </svg>`
+          );
+        };
+
+        // trigger a manual re-check by resetting src (only if src exists)
+        if (src) {
+          // quick "touch" to re-trigger load if browser previously failed
+          const tmp = imgEl.src;
+          imgEl.src = "";
+          // small delay to allow onerror handler to run if needed
+          setTimeout(() => { imgEl.src = tmp; }, 50);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("ensureImagesDisplayed error:", err);
+  }
+}
+
+// --- Hook this into your existing loadEntries flow ---
+// Find this block in your code inside loadEntries() where you have:
+//    snapshot.forEach(docSnap => { renderEntryCard(docSnap, entriesEl); });
+// Add the following line IMMEDIATELY AFTER that for-loop (inside loadEntries):
+//
+//    // ensure images show (add-on)
+//    await ensureImagesDisplayed(entriesEl);
+//
+//
+// If you prefer not to modify loadEntries directly, append this small watcher that runs after loadEntries completes:
+(function watchForLoadEntriesAndEnsureImages() {
+  // whenever loadEntries is called, it updates #entries; we detect DOM changes and fix images
+  const entriesContainer = document.getElementById("entries");
+  if (!entriesContainer) return;
+
+  const observer = new MutationObserver((mutations) => {
+    // basic debounce
+    if (observer._timer) clearTimeout(observer._timer);
+    observer._timer = setTimeout(() => {
+      ensureImagesDisplayed(entriesContainer).catch(console.error);
+    }, 120);
+  });
+
+  observer.observe(entriesContainer, { childList: true, subtree: true });
+})();
 
