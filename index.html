@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>My Time Capsule</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- STORAGE WARNING BANNER -->
+<div id="storageWarning" class="storage-warning hidden">
+  <p>⚠️ Using Time Capsule in private/incognito mode. Your session will be cleared when you close the browser.</p>
+  <button id="closeWarningBtn" class="warning-close">✕</button>
+</div>
+
+<div id="login-box" class="auth-container">
+  <div class="auth-card">
+    <h1>🔒 Time Capsule</h1>
+    <p class="subtitle">Preserve your daily moments</p>
+    
+    <form id="loginForm" onsubmit="return false;">
+      <div class="form-group">
+        <input 
+          type="email" 
+          id="email" 
+          placeholder="Your Email" 
+          required 
+          autocomplete="email"
+        />
+        <span id="emailError" class="error-msg"></span>
+      </div>
+      
+      <div class="form-group">
+        <input 
+          type="password" 
+          id="password" 
+          placeholder="Password (min 8 chars, uppercase, number, special char)" 
+          required 
+          autocomplete="current-password"
+        />
+        <span id="passwordError" class="error-msg"></span>
+      </div>
+
+      <span id="loginError" class="error-msg"></span>
+      
+      <button id="enterCapsuleBtn" type="button" class="btn-primary">
+        Enter Capsule
+      </button>
+    </form>
+  </div>
+</div>
+
+<div id="capsule" class="hidden">
+  <div class="capsule-container">
+    <!-- HEADER WITH LOGOUT & NAVIGATION -->
+    <div class="capsule-header">
+      <h1>🕰️ My Time Capsule</h1>
+      <div class="header-controls">
+        <button id="statsBtn" class="btn-nav">📊 Stats</button>
+        <button id="exportBtn" class="btn-nav">📥 Export</button>
+        <button id="logoutBtn" class="btn-logout">Logout</button>
+      </div>
+    </div>
+
+    <!-- WRITE ENTRY PAGE -->
+    <div id="writePage" class="page active">
+      <div class="entry-type-tabs">
+        <button id="todayTabBtn" class="tab-btn active">✍️ Today's Entries</button>
+        <button id="previousTabBtn" class="tab-btn">📚 Previous Entries</button>
+      </div>
+
+      <!-- TODAY'S ENTRIES -->
+      <div id="todayContent" class="entry-content active">
+        <div class="entry-input-section">
+          <h3>📝 Write Entry</h3>
+          <form id="entryForm" onsubmit="return false;">
+            <textarea 
+              id="entry" 
+              placeholder="What did you do today? Share your thoughts..." 
+              maxlength="500"
+              required
+            ></textarea>
+            <div class="char-count">
+              <span id="charCount">0</span>/500
+            </div>
+
+            <div class="form-group">
+              <input 
+                type="text" 
+                id="entryTags" 
+                placeholder="Add tags (comma separated, e.g. work, personal, travel)" 
+              />
+            </div>
+
+            <div class="image-upload-section">
+              <label for="imageUpload" class="image-upload-label">📸 Add Images</label>
+              <input 
+                type="file" 
+                id="imageUpload" 
+                multiple 
+                accept="image/*"
+                class="image-upload-input"
+              />
+              <div id="imagePreviewContainer" class="image-preview-container"></div>
+            </div>
+
+            <button id="saveEntryBtn" type="button" class="btn-primary">
+              Save Entry
+            </button>
+          </form>
+        </div>
+
+        <div class="entries-section">
+          <h3>📜 Today's Entries</h3>
+          <div class="search-container">
+            <input 
+              type="text" 
+              id="searchEntries" 
+              placeholder="Search entries..." 
+            />
+          </div>
+          <div id="entries" class="entries-list"></div>
+        </div>
+      </div>
+
+      <!-- PREVIOUS ENTRIES -->
+      <div id="previousContent" class="entry-content hidden">
+        <div class="previous-entries-header">
+          <h3>📚 Previous Entries</h3>
+          <div class="sort-controls">
+            <label for="sortSelect">Sort by:</label>
+            <select id="sortSelect" class="sort-select">
+              <option value="newest">Newest First</option>
+              <option value="oldest">Oldest First</option>
+              <option value="largest">Largest First</option>
+              <option value="smallest">Smallest First</option>
+            </select>
+          </div>
+        </div>
+        <div class="search-container">
+          <input 
+            type="text" 
+            id="searchPreviousEntries" 
+            placeholder="Search entries..." 
+          />
+        </div>
+        <div id="previousEntriesList" class="entries-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EDIT MODAL -->
+  <div id="editModal" class="modal hidden">
+    <div class="modal-content">
+      <span class="modal-close">&times;</span>
+      <h2>Edit Entry</h2>
+      <form id="editForm" onsubmit="return false;">
+        <textarea 
+          id="editEntryText" 
+          placeholder="Edit your entry..." 
+          maxlength="500"
+          required
+        ></textarea>
+        <div class="char-count">
+          <span id="editCharCount">0</span>/500
+        </div>
+
+        <div class="form-group">
+          <input 
+            type="text" 
+            id="editEntryTags" 
+            placeholder="Edit tags (comma separated)" 
+          />
+        </div>
+
+        <div class="image-upload-section">
+          <label for="editImageUpload" class="image-upload-label">📸 Add/Update Images</label>
+          <input 
+            type="file" 
+            id="editImageUpload" 
+            multiple 
+            accept="image/*"
+            class="image-upload-input"
+          />
+          <div id="editImagePreviewContainer" class="image-preview-container"></div>
+        </div>
+
+        <div class="modal-actions">
+          <button id="saveEditBtn" type="button" class="btn-primary">Save Changes</button>
+          <button id="cancelEditBtn" type="button" class="btn-cancel">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- INACTIVITY WARNING -->
+  <div id="inactivityWarning" class="modal hidden">
+    <div class="modal-content">
+      <h2>⏱️ Inactivity Warning</h2>
+      <p>You've been inactive for a while. You'll be logged out in <span id="countdownSeconds">60</span> seconds.</p>
+      <div class="modal-actions">
+        <button id="stayLoggedBtn" class="btn-primary">Stay Logged In</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  // Detect private/incognito mode
+  function detectPrivateMode() {
+    return new Promise((resolve) => {
+      const isPrivate = !window.indexedDB || 
+                        !window.localStorage || 
+                        (navigator.storage && !navigator.storage.persist);
+      
+      // Additional check using IndexedDB
+      const test = indexedDB.open("__private_mode_test__");
+      test.onerror = () => resolve(true); // Private mode
+      test.onsuccess = () => {
+        indexedDB.deleteDatabase("__private_mode_test__");
+        resolve(false); // Not private mode
+      };
+    });
+  }
+
+  // Show warning if in private mode
+  detectPrivateMode().then((isPrivate) => {
+    if (isPrivate) {
+      const warningEl = document.getElementById("storageWarning");
+      if (warningEl) {
+        warningEl.classList.remove("hidden");
+      }
+    }
+  }).catch(() => {
+    // If detection fails, show warning anyway
+    const warningEl = document.getElementById("storageWarning");
+    if (warningEl) {
+      warningEl.classList.remove("hidden");
+    }
+  });
+
+  // Close warning button
+  document.addEventListener("DOMContentLoaded", () => {
+    const closeWarningBtn = document.getElementById("closeWarningBtn");
+    if (closeWarningBtn) {
+      closeWarningBtn.addEventListener("click", () => {
+        const warningEl = document.getElementById("storageWarning");
+        if (warningEl) {
+          warningEl.classList.add("hidden");
+        }
+      });
+    }
+  });
+</script>
+
+<script type="module" src="script.js"></script>
+</body>
+</html>
