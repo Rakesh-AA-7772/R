@@ -849,3 +849,280 @@ const isStorageAvailable = detectStorageAvailability();
 if (!isStorageAvailable) {
   console.warn("⚠️ Running in private/incognito mode or storage is disabled");
 }
+/* =========================
+  ADD-ON: Multi-device-safe image upload (append only)
+  - Do NOT remove or edit existing code; this block only adds behavior.
+  ========================= */
+
+(async function addMultiDeviceImageSupport() {
+  // dynamic import for auth persistence and storage APIs (so we don't modify your top imports)
+  const authMod = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js").catch(()=>null);
+  const storageMod = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js").catch(()=>null);
+
+  // Try to set browserLocalPersistence now (best-effort; won't throw if unavailable)
+  try {
+    if (authMod && authMod.browserLocalPersistence) {
+      await setPersistence(auth, authMod.browserLocalPersistence);
+      console.log("Persistence set to browserLocalPersistence (add-on).");
+    }
+  } catch (e) {
+    console.warn("Could not enforce browserLocalPersistence (add-on):", e);
+  }
+
+  // small helper: wait until auth is ready (avoid upload race)
+  function ensureAuthReady(timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+      if (auth.currentUser) return resolve(auth.currentUser);
+      const unsub = auth.onAuthStateChanged(user => {
+        if (user) {
+          unsub();
+          resolve(user);
+        }
+      });
+      setTimeout(() => {
+        try { unsub(); } catch {}
+        reject(new Error("Auth not ready"));
+      }, timeoutMs);
+    });
+  }
+
+  // store File objects separately (we don't remove your selectedImages array)
+  // This is an additive array that won't break existing logic.
+  if (typeof window.selectedImageFiles === "undefined") {
+    window.selectedImageFiles = [];
+  }
+
+  // If your page already had an <input id="imageUpload">, add a listener that also
+  // captures the raw File objects into selectedImageFiles (in addition to your existing base64 logic).
+  try {
+    const imageUploadEl = document.getElementById("imageUpload");
+    if (imageUploadEl) {
+      imageUploadEl.addEventListener("change", (e) => {
+        window.selectedImageFiles = Array.from(e.target.files || []).filter(f => f && f.type && f.type.startsWith("image/"));
+        // keep existing behavior untouched — this add-on only duplicates File objects for proper upload
+      });
+    }
+  } catch (e) {
+    console.warn("Add-on: image input hookup failed", e);
+  }
+
+  // compress File -> Blob helper (client-side)
+  async function compressImageFileToBlob(file, maxWidth = 1200, quality = 0.75) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = reject;
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = reject;
+        img.onload = () => {
+          const scale = Math.min(1, maxWidth / img.width);
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.round(img.width * scale);
+          canvas.height = Math.round(img.height * scale);
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((blob) => {
+            if (!blob) return reject(new Error("Canvas conversion failed"));
+            resolve(blob);
+          }, "image/jpeg", quality);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Upload mixed array (strings are passed through, File objects are compressed+uploaded)
+  async function uploadFilesAndGetUrlsMixed(mixedArray = [], userUid, docId) {
+    if (!storageMod) throw new Error("Storage module not available");
+    const storage = storageMod.getStorage();
+    const uploadPromises = [];
+    const urls = [];
+
+    for (const item of mixedArray) {
+      if (!item) continue;
+      if (typeof item === "string") {
+        // already a URL (existing behavior)
+        urls.push(item);
+        continue;
+      }
+      // File object -> compress -> upload
+      if (item instanceof File) {
+        uploadPromises.push((async () => {
+          try {
+            const blob = await compressImageFileToBlob(item, 1200, 0.78);
+            const safeName = `${Date.now()}_${item.name.replace(/\s+/g,'_')}`;
+            const path = `users/${userUid}/entries/${docId}/${safeName}`;
+            const ref = storageMod.ref(storage, path);
+            await storageMod.uploadBytes(ref, blob);
+            const durl = await storageMod.getDownloadURL(ref);
+            urls.push(durl);
+          } catch (err) {
+            console.error("Add-on: file upload failed for", item.name, err);
+            // continue without failing entire batch
+          }
+        })());
+      }
+    }
+
+    await Promise.all(uploadPromises);
+    return urls;
+  }
+
+  // Wrap your saveEntry without removing it:
+  // - if selectedImageFiles has files, do storage upload flow (create placeholder doc, upload, update)
+  // - otherwise, call the original saveEntry (keeps your prior base64 behavior)
+  try {
+    const originalSave = window.saveEntry;
+    window.saveEntry = async function wrappedSaveEntry(...args) {
+      // ensure auth ready before trying anything (fixes multi-device race)
+      let user;
+      try {
+        user = await ensureAuthReady(7000); // wait up to 7s
+      } catch (err) {
+        // If auth not ready, fallback to original behavior (which may fail) but we surface message
+        console.warn("Add-on: auth not ready before saveEntry:", err);
+        return originalSave && originalSave.apply(this, args);
+      }
+
+      // If there are real File objects selected, use storage upload flow
+      if (Array.isArray(window.selectedImageFiles) && window.selectedImageFiles.length > 0 && storageMod) {
+        try {
+          // replicate your saveEntry's validation (minimal)
+          const entryEl = document.getElementById("entry");
+          if (!entryEl) return;
+          const text = sanitizeInput(entryEl.value);
+          if (!text) return;
+
+          // Prepare tags similar to your code
+          const tagsEl = document.getElementById("entryTags");
+          const tags = tagsEl ? tagsEl.value.split(",").map(t => t.trim()).filter(t => t) : [];
+
+          // encrypt text (reuse your function)
+          const encrypted = await encryptText(text, window.currentPassword || user.email);
+
+          // create placeholder doc to get id (we use addDoc then update)
+          const entriesRef = collection(db, "users", user.uid, "entries");
+          const placeholderRef = await addDoc(entriesRef, { createdAt: serverTimestamp(), placeholder: true });
+
+          // upload files to Storage using the placeholder id path
+          const uploadedUrls = await uploadFilesAndGetUrlsMixed(window.selectedImageFiles, user.uid, placeholderRef.id);
+
+          // finalize doc with full data
+          await updateDoc(placeholderRef, {
+            text: encrypted,
+            images: uploadedUrls,
+            tags,
+            createdAt: serverTimestamp(),
+            encrypted: true,
+            wordCount: text.split(/\s+/).filter(w => w).length,
+            placeholder: false
+          });
+
+          // clear UI (non-destructive to your other arrays)
+          entryEl.value = "";
+          if (tagsEl) tagsEl.value = "";
+          window.selectedImageFiles = [];
+          const previewEl = document.getElementById("imagePreviewContainer");
+          if (previewEl) previewEl.innerHTML = "";
+          const imageUploadEl = document.getElementById("imageUpload");
+          if (imageUploadEl) imageUploadEl.value = "";
+
+          // reload entries using your function
+          if (typeof loadEntries === "function") loadEntries();
+
+          return;
+        } catch (err) {
+          console.error("Add-on: storage upload flow failed:", err);
+          // fallback to original saveEntry in case something unexpected happened
+          return originalSave && originalSave.apply(this, args);
+        }
+      }
+
+      // No File objects => call original saveEntry (keeps your previous behavior)
+      return originalSave && originalSave.apply(this, args);
+    };
+    console.log("Add-on: saveEntry wrapped to support multi-device image uploads.");
+  } catch (e) {
+    console.warn("Add-on: could not wrap saveEntry:", e);
+  }
+
+  // Wrap edit/saveEdit similarly so edits with new File objects get uploaded to Storage
+  try {
+    // locate original saveEdit function (it might be exported, but in browser it's available globally)
+    const originalSaveEdit = window.saveEdit || (typeof saveEdit === "function" ? saveEdit : null);
+    if (originalSaveEdit) {
+      window.saveEdit = async function wrappedSaveEdit(entryId, ...rest) {
+        // ensure auth ready
+        let user;
+        try {
+          user = await ensureAuthReady(7000);
+        } catch (err) {
+          console.warn("Add-on: auth not ready before saveEdit:", err);
+          return originalSaveEdit.apply(this, [entryId, ...rest]);
+        }
+
+        // editingImages may contain File objects (we added a handler for edit input earlier)
+        if (Array.isArray(editingImages) && editingImages.some(i => i instanceof File) && storageMod) {
+          try {
+            // encrypt new text if present in the edit modal
+            const editTextarea = document.getElementById("editEntryText");
+            const newText = editTextarea ? sanitizeInput(editTextarea.value) : null;
+            if (!newText) return;
+
+            const encrypted = await encryptText(newText, window.currentPassword || user.email);
+            const editTagsEl = document.getElementById("editEntryTags");
+            const tags = editTagsEl ? editTagsEl.value.split(",").map(t => t.trim()).filter(t => t) : [];
+
+            // Upload any File objects in editingImages to storage under entryId
+            const uploadedUrls = await uploadFilesAndGetUrlsMixed(editingImages, user.uid, entryId);
+
+            // update doc
+            const entryRef = doc(db, "users", user.uid, "entries", entryId);
+            await updateDoc(entryRef, {
+              text: encrypted,
+              images: uploadedUrls,
+              tags,
+              updatedAt: serverTimestamp(),
+              wordCount: newText.split(/\s+/).filter(w => w).length
+            });
+
+            // close modal and reload
+            if (typeof closeEditModal === "function") closeEditModal();
+            if (typeof loadEntries === "function") loadEntries();
+            if (PreviousEntriesModule && PreviousEntriesModule.loadPreviousEntries) {
+              PreviousEntriesModule.loadPreviousEntries();
+            }
+            return;
+          } catch (err) {
+            console.error("Add-on: saveEdit storage flow failed:", err);
+            return originalSaveEdit.apply(this, [entryId, ...rest]);
+          }
+        }
+
+        // fallback
+        return originalSaveEdit.apply(this, [entryId, ...rest]);
+      };
+      console.log("Add-on: saveEdit wrapped to support file uploads for edits.");
+    }
+  } catch (e) {
+    console.warn("Add-on: could not wrap saveEdit:", e);
+  }
+
+  // small safety: ensure editing image input also sets editingImages to File objects
+  try {
+    const editImageInput = document.getElementById("editImageUpload");
+    if (editImageInput) {
+      editImageInput.addEventListener("change", (e) => {
+        // keep your preview logic intact; also store raw files for upload
+        editingImages = Array.from(e.target.files || []).filter(f => f && f.type && f.type.startsWith("image/"));
+      });
+    }
+  } catch (e) {
+    console.warn("Add-on: edit image hookup failed", e);
+  }
+
+  // final note
+  console.log("Add-on: multi-device image support initialized (append-only).");
+})();
+
