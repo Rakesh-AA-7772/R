@@ -1,5 +1,9 @@
+// script.js (full file — replace your existing script.js with this)
+// NOTE: encryption helpers live in crypto.js (imported below)
+
 import { auth, db } from "./firebase.js";
 import * as PreviousEntriesModule from "./previous-entries.js";
+import { encryptText, decryptText } from "./crypto.js";
 
 import {
   signInWithEmailAndPassword,
@@ -42,70 +46,6 @@ function validateCSRFToken() {
 
 // Generate CSRF token immediately on script load
 generateCSRFToken();
-
-/* ================= ENCRYPTION HELPERS ================= */
-
-function deriveKey(password) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(password);
-  return crypto.subtle.digest("SHA-256", data).then(buf => new Uint8Array(buf));
-}
-
-export async function encryptText(text, password) {
-  const key = await deriveKey(password);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encoder = new TextEncoder();
-  const data = encoder.encode(text);
-
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    key,
-    { name: "AES-GCM" },
-    false,
-    ["encrypt"]
-  );
-
-  const encrypted = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    cryptoKey,
-    data
-  );
-
-  const combined = new Uint8Array(iv.length + encrypted.byteLength);
-  combined.set(iv);
-  combined.set(new Uint8Array(encrypted), iv.length);
-
-  return btoa(String.fromCharCode(...combined));
-}
-
-export async function decryptText(encryptedData, password) {
-  try {
-    const key = await deriveKey(password);
-    const combined = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
-    const iv = combined.slice(0, 12);
-    const encrypted = combined.slice(12);
-
-    const cryptoKey = await crypto.subtle.importKey(
-      "raw",
-      key,
-      { name: "AES-GCM" },
-      false,
-      ["decrypt"]
-    );
-
-    const decrypted = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv },
-      cryptoKey,
-      encrypted
-    );
-
-    const decoder = new TextDecoder();
-    return decoder.decode(decrypted);
-  } catch (err) {
-    console.error("Decryption failed:", err);
-    return null;
-  }
-}
 
 /* ================= IMAGE HANDLING ================= */
 
@@ -510,7 +450,6 @@ window.saveEntry = async function () {
   } catch (err) {
     console.error("Save entry error:", err);
     alert("Failed to save entry. Please try again.");
-    await ensureImagesDisplayed(entriesE1);
   }
 };
 
@@ -850,6 +789,7 @@ const isStorageAvailable = detectStorageAvailability();
 if (!isStorageAvailable) {
   console.warn("⚠️ Running in private/incognito mode or storage is disabled");
 }
+
 /* =========================
   ADD-ON: Multi-device-safe image upload (append only)
   - Do NOT remove or edit existing code; this block only adds behavior.
@@ -1126,6 +1066,7 @@ if (!isStorageAvailable) {
   // final note
   console.log("Add-on: multi-device image support initialized (append-only).");
 })();
+
 /* =========================
   ADD-ON: Ensure entry images display (append-only)
   - No existing functions are modified.
@@ -1174,17 +1115,13 @@ async function ensureImagesDisplayed(containerEl = null) {
     // find each card's images-block and attempt to validate/load each image
     const entryCards = Array.from(container.querySelectorAll(".entry-card"));
     for (const card of entryCards) {
-      // log images field if present on the card element dataset (for debugging)
-      // Note: this logs whatever the server returned when rendering; keep for debugging
       const imgs = Array.from(card.querySelectorAll(".entry-images img"));
       for (const imgEl of imgs) {
-        // if image already loaded OK, skip
         if (imgEl.complete && imgEl.naturalWidth > 0) continue;
 
         const src = imgEl.getAttribute("src") || "";
         console.log("ensureImagesDisplayed: checking img src:", src);
 
-        // attach onload/onerror handlers to show fallback / debug
         imgEl.onload = () => {
           imgEl.classList.remove("image-loading");
           imgEl.classList.add("image-loaded");
@@ -1192,7 +1129,6 @@ async function ensureImagesDisplayed(containerEl = null) {
         imgEl.onerror = async () => {
           console.warn("ensureImagesDisplayed: image failed to load:", src);
 
-          // Try resolving via storage rules if the src looks like a storage path or gs:// or not http
           const resolved = await tryResolveStorageUrl(src);
           if (resolved) {
             console.log("ensureImagesDisplayed: resolved storage url ->", resolved);
@@ -1200,7 +1136,6 @@ async function ensureImagesDisplayed(containerEl = null) {
             return;
           }
 
-          // final fallback: replace with a small inline placeholder so UI isn't empty
           imgEl.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(
             `<svg xmlns='http://www.w3.org/2000/svg' width='300' height='180'>
                <rect width='100%' height='100%' fill='#111827'/>
@@ -1209,12 +1144,9 @@ async function ensureImagesDisplayed(containerEl = null) {
           );
         };
 
-        // trigger a manual re-check by resetting src (only if src exists)
         if (src) {
-          // quick "touch" to re-trigger load if browser previously failed
           const tmp = imgEl.src;
           imgEl.src = "";
-          // small delay to allow onerror handler to run if needed
           setTimeout(() => { imgEl.src = tmp; }, 50);
         }
       }
@@ -1224,23 +1156,12 @@ async function ensureImagesDisplayed(containerEl = null) {
   }
 }
 
-// --- Hook this into your existing loadEntries flow ---
-// Find this block in your code inside loadEntries() where you have:
-//    snapshot.forEach(docSnap => { renderEntryCard(docSnap, entriesEl); });
-// Add the following line IMMEDIATELY AFTER that for-loop (inside loadEntries):
-//
-//    // ensure images show (add-on)
-//    await ensureImagesDisplayed(entriesEl);
-//
-//
-// If you prefer not to modify loadEntries directly, append this small watcher that runs after loadEntries completes:
+// watch #entries for changes and run ensureImagesDisplayed
 (function watchForLoadEntriesAndEnsureImages() {
-  // whenever loadEntries is called, it updates #entries; we detect DOM changes and fix images
   const entriesContainer = document.getElementById("entries");
   if (!entriesContainer) return;
 
   const observer = new MutationObserver((mutations) => {
-    // basic debounce
     if (observer._timer) clearTimeout(observer._timer);
     observer._timer = setTimeout(() => {
       ensureImagesDisplayed(entriesContainer).catch(console.error);
@@ -1249,4 +1170,3 @@ async function ensureImagesDisplayed(containerEl = null) {
 
   observer.observe(entriesContainer, { childList: true, subtree: true });
 })();
-
