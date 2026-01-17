@@ -1,7 +1,6 @@
 // script.js (full file — replace your existing script.js with this)
 // NOTE: encryption helpers live in crypto.js (imported below)
 
-import { auth, db } from "./firebase.js";
 import * as PreviousEntriesModule from "./previous-entries.js";
 import { encryptText, decryptText } from "./crypto.js";
 
@@ -26,6 +25,87 @@ import {
   updateDoc,
   where
 } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+
+/* ============================
+   NOTE ABOUT FIREBASE / INDEXEDDB
+   ============================
+   Your console was showing:
+     "IndexedDB disabled for this app" (thrown by Firebase analytics / idb code)
+   That error often happens in browsers with storage restricted (e.g. some incognito modes)
+   or when policy blocks IndexedDB. Firebase's analytics/heartbeat code throws an unhandled
+   rejection internally which bubbled out into your console.
+
+   Below we:
+   1) Detect if IndexedDB is usable.
+   2) If it's not, we install a targeted unhandledrejection handler that suppresses the
+      specific Firebase "IndexedDB disabled for this app" error so it doesn't appear as
+      an uncaught exception in your console while leaving other errors visible.
+   3) We also guard persistence-related calls with try/catch.
+   If you prefer to fix the root (recommended), edit firebase.js to avoid initializing
+   analytics when IndexedDB isn't available — I can help with that if you want.
+*/
+
+/* ================= INDEXEDDB DETECTION & ERROR SUPPRESSION ================ */
+
+async function isIndexedDBAvailable(timeout = 1200) {
+  return new Promise((resolve) => {
+    if (!window.indexedDB) return resolve(false);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; resolve(false); }, timeout);
+
+    try {
+      const req = indexedDB.open("__test_db_for_availability__");
+      req.onerror = () => {
+        if (!timedOut) {
+          clearTimeout(timer);
+          resolve(false);
+        }
+      };
+      req.onsuccess = () => {
+        try {
+          const db = req.result;
+          db.close();
+          indexedDB.deleteDatabase("__test_db_for_availability__");
+        } catch (e) {}
+        if (!timedOut) {
+          clearTimeout(timer);
+          resolve(true);
+        }
+      };
+    } catch (e) {
+      if (!timedOut) {
+        clearTimeout(timer);
+        resolve(false);
+      }
+    }
+  });
+}
+
+// Install early suppression for the specific Firebase IndexedDB error.
+// We register the suppression quickly so it catches library rejections that otherwise become uncaught.
+(async function registerIndexedDBSuppression() {
+  const ok = await isIndexedDBAvailable();
+  if (!ok) {
+    console.warn("IndexedDB unavailable — installing suppression for Firebase IndexedDB errors.");
+    window.addEventListener("unhandledrejection", (ev) => {
+      try {
+        const reason = ev.reason;
+        const msg = reason && (reason.message || String(reason));
+        if (typeof msg === "string" && msg.includes("IndexedDB disabled for this app")) {
+          // Prevent the unhandled rejection from logging as an uncaught error.
+          console.warn("Suppressed Firebase IndexedDB error:", reason);
+          ev.preventDefault();
+        }
+      } catch (suppressErr) {
+        // If something goes wrong in this handler, don't block other handlers.
+        console.error("Error in unhandledrejection suppression handler:", suppressErr);
+      }
+    });
+  } else {
+    // IndexedDB available — nothing to suppress.
+    console.log("IndexedDB available.");
+  }
+})();
 
 /* ================= SECURITY: CSRF TOKENS ================= */
 
@@ -215,10 +295,10 @@ export function searchEntries(query, entries) {
   );
 }
 
-/* ================= EXPORT TO PDF ================= */
+/* ================= EXPORT TO JSON ================= */
 
 export async function exportEntriesToJSON() {
-  const user = auth.currentUser;
+  const user = auth?.currentUser;
   if (!user) {
     alert("Not authenticated");
     return;
@@ -262,7 +342,7 @@ export async function exportEntriesToJSON() {
 /* ================= ENTRY STATISTICS ================= */
 
 export async function getEntryStats() {
-  const user = auth.currentUser;
+  const user = auth?.currentUser;
   if (!user) return null;
 
   try {
@@ -304,9 +384,47 @@ export async function getEntryStats() {
   }
 }
 
+/* =================== FIREBASE IMPORT HANDLING ===================
+   We expect there to be a local firebase.js that exports `auth` and `db`.
+   Because Firebase's libraries may attempt to access IndexedDB on import,
+   and that can throw in some environments, we register the global
+   suppression above and also perform a safe dynamic import here.
+   This allows the rest of the script to reference `auth` and `db`
+   after the module loads.
+================================================================= */
+
+let auth = null;
+let db = null;
+let firebaseModuleLoaded = false;
+
+async function loadFirebaseModuleOnce() {
+  if (firebaseModuleLoaded) return { auth, db };
+  try {
+    const mod = await import("./firebase.js");
+    auth = mod.auth;
+    db = mod.db;
+    firebaseModuleLoaded = true;
+    // Re-register onAuthStateChanged now that auth is available.
+    if (typeof onAuthStateChanged === "function") {
+      onAuthStateChanged(auth, async (user) => {
+        await handleAuthStateChanged(user);
+      });
+    }
+    return { auth, db };
+  } catch (err) {
+    console.error("Failed to dynamically import ./firebase.js (caught):", err);
+    // Try to continue — many Firebase operations may still work if the library partially loaded.
+    // The unhandledrejection handler above should have suppressed the noisy IndexedDB error.
+    return { auth: null, db: null };
+  }
+}
+
 /* ================= LOGIN ================= */
 
 window.login = async function () {
+  // Ensure firebase module is loaded before trying to use auth
+  await loadFirebaseModuleOnce();
+
   // Regenerate and validate CSRF token on each login attempt
   generateCSRFToken();
   
@@ -342,14 +460,27 @@ window.login = async function () {
 
   try {
     checkLoginRateLimit(email);
-    await setPersistence(auth, inMemoryPersistence);
+
+    // Attempt to set persistence - guard in case IndexedDB is restricted.
+    try {
+      // prefer in-memory for security; if browserLocalPersistence is required elsewhere we try-catch it
+      await setPersistence(auth, inMemoryPersistence);
+    } catch (persistErr) {
+      console.warn("Could not set inMemoryPersistence (falling back):", persistErr);
+      try {
+        await setPersistence(auth, browserSessionPersistence);
+      } catch (persistErr2) {
+        console.warn("Could not set browserSessionPersistence either:", persistErr2);
+      }
+    }
+
     await signInWithEmailAndPassword(auth, email, password);
     clearLoginAttempts(email);
     emailEl.value = "";
     passwordEl.value = "";
   } catch (err) {
-    console.error("Login error:", err.code, err.message);
-    loginErrorEl.textContent = err.message || "Login failed. Check your credentials.";
+    console.error("Login error:", err?.code, err?.message || err);
+    loginErrorEl.textContent = (err && err.message) ? err.message : "Login failed. Check your credentials.";
   } finally {
     enterBtn.disabled = false;
     enterBtn.textContent = "Enter Capsule";
@@ -364,18 +495,18 @@ window.logout = async function () {
     clearTimeout(warningTimer);
     csrfToken = null;
     sessionStorage.clear();
-    await auth.signOut();
+    if (auth && typeof auth.signOut === "function") await auth.signOut();
   } catch (err) {
     console.error("Logout error:", err);
     alert("Logout failed");
   }
 };
 
-/* ================= AUTH STATE ================= */
+/* ================= AUTH STATE HANDLER (moved into dynamic flow) ================= */
 
 window.currentPassword = null;
 
-onAuthStateChanged(auth, async (user) => {
+async function handleAuthStateChanged(user) {
   const loginBox = document.getElementById("login-box");
   const capsule = document.getElementById("capsule");
 
@@ -386,11 +517,14 @@ onAuthStateChanged(auth, async (user) => {
     // Don't regenerate token here, it's already created
 
     try {
-      await setDoc(
-        doc(db, "users", user.uid),
-        { createdAt: serverTimestamp(), lastLogin: serverTimestamp() },
-        { merge: true }
-      );
+      // Ensure db is present
+      if (db) {
+        await setDoc(
+          doc(db, "users", user.uid),
+          { createdAt: serverTimestamp(), lastLogin: serverTimestamp() },
+          { merge: true }
+        );
+      }
     } catch (err) {
       console.error("User doc error:", err);
     }
@@ -404,12 +538,13 @@ onAuthStateChanged(auth, async (user) => {
     if (capsule) capsule.classList.add("hidden");
     window.currentPassword = null;
   }
-});
+}
 
 /* ================= SAVE ENTRY ================= */
 
 window.saveEntry = async function () {
-  const user = auth.currentUser;
+  await loadFirebaseModuleOnce(); // ensure firebase available
+  const user = auth?.currentUser;
   if (!user) {
     alert("Not authenticated");
     return;
@@ -456,7 +591,8 @@ window.saveEntry = async function () {
 /* ================= LOAD ENTRIES ================= */
 
 async function loadEntries() {
-  const user = auth.currentUser;
+  await loadFirebaseModuleOnce();
+  const user = auth?.currentUser;
   if (!user) return;
 
   const entriesEl = document.getElementById("entries");
@@ -599,7 +735,8 @@ function closeEditModal() {
 }
 
 export async function saveEdit(entryId) {
-  const user = auth.currentUser;
+  await loadFirebaseModuleOnce();
+  const user = auth?.currentUser;
   if (!user) return;
 
   const editTextarea = document.getElementById("editEntryText");
@@ -638,7 +775,7 @@ export async function saveEdit(entryId) {
 export async function deleteEntry(entryId) {
   if (!confirm("Are you sure you want to delete this entry?")) return;
 
-  const user = auth.currentUser;
+  const user = auth?.currentUser;
   if (!user) return;
 
   try {
@@ -657,16 +794,26 @@ export async function deleteEntry(entryId) {
 /* ================= EVENT BINDINGS ================= */
 
 document.addEventListener("DOMContentLoaded", () => {
+  // Load firebase module asap (non-blocking)
+  loadFirebaseModuleOnce().catch(err => console.warn("firebase module load (async) failed:", err));
+
   // Login
   const loginBtn = document.getElementById("enterCapsuleBtn");
   if (loginBtn) {
-    loginBtn.addEventListener("click", window.login);
+    loginBtn.addEventListener("click", async (e) => {
+      // ensure firebase is ready before calling login
+      await loadFirebaseModuleOnce();
+      window.login();
+    });
   }
 
   // Save entry
   const saveBtn = document.getElementById("saveEntryBtn");
   if (saveBtn) {
-    saveBtn.addEventListener("click", window.saveEntry);
+    saveBtn.addEventListener("click", async () => {
+      await loadFirebaseModuleOnce();
+      window.saveEntry();
+    });
   }
 
   // Logout
@@ -723,6 +870,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const statsBtn = document.getElementById("statsBtn");
   if (statsBtn) {
     statsBtn.addEventListener("click", async () => {
+      await loadFirebaseModuleOnce();
       const stats = await getEntryStats();
       if (stats) {
         alert(`📊 Your Statistics\n\nTotal Entries: ${stats.totalEntries}\nTotal Words: ${stats.totalWords}\nTotal Images: ${stats.totalImages}`);
@@ -803,8 +951,12 @@ if (!isStorageAvailable) {
   // Try to set browserLocalPersistence now (best-effort; won't throw if unavailable)
   try {
     if (authMod && authMod.browserLocalPersistence) {
-      await setPersistence(auth, authMod.browserLocalPersistence);
-      console.log("Persistence set to browserLocalPersistence (add-on).");
+      try {
+        await setPersistence(auth, authMod.browserLocalPersistence);
+        console.log("Persistence set to browserLocalPersistence (add-on).");
+      } catch (e) {
+        console.warn("Could not enforce browserLocalPersistence (add-on):", e);
+      }
     }
   } catch (e) {
     console.warn("Could not enforce browserLocalPersistence (add-on):", e);
@@ -813,17 +965,23 @@ if (!isStorageAvailable) {
   // small helper: wait until auth is ready (avoid upload race)
   function ensureAuthReady(timeoutMs = 5000) {
     return new Promise((resolve, reject) => {
-      if (auth.currentUser) return resolve(auth.currentUser);
-      const unsub = auth.onAuthStateChanged(user => {
-        if (user) {
-          unsub();
-          resolve(user);
-        }
-      });
-      setTimeout(() => {
-        try { unsub(); } catch {}
-        reject(new Error("Auth not ready"));
-      }, timeoutMs);
+      if (auth && auth.currentUser) return resolve(auth.currentUser);
+      try {
+        const unsub = auth?.onAuthStateChanged
+          ? auth.onAuthStateChanged(user => {
+            if (user) {
+              try { unsub(); } catch {}
+              resolve(user);
+            }
+          })
+          : () => {};
+        setTimeout(() => {
+          try { unsub(); } catch {}
+          reject(new Error("Auth not ready"));
+        }, timeoutMs);
+      } catch (err) {
+        reject(err);
+      }
     });
   }
 
