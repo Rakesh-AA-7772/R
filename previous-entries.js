@@ -1,6 +1,7 @@
+// previous-entries.js
 import { auth, db } from "./firebase.js";
 import { collection, getDocs, query, orderBy } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
-import { decryptText } from "./script.js";
+import { decryptText } from "./crypto.js"; // <- now from crypto.js (no circular import)
 
 let allEntries = [];
 let currentSortOrder = "newest";
@@ -34,7 +35,7 @@ export async function loadPreviousEntries() {
         images: data.images || [],
         tags: data.tags || [],
         createdAt: data.createdAt?.toDate?.() || new Date(),
-        wordCount: text.split(/\s+/).length
+        wordCount: (text || "").split(/\s+/).filter(w => w).length
       });
     }
 
