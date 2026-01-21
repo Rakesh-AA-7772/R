@@ -1,13 +1,11 @@
-// Import the functions you need from the SDKs you need
+// firebase.js
+// Minimal Firebase initialization — NO Analytics, NO IndexedDB monkey-patching.
+
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
-import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-analytics.js";
-import { getAuth, connectAuthEmulator } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-import { getFirestore, connectFirestoreEmulator } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
+import { getAuth } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
+import { getFirestore } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
 
 // Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
   apiKey: "AIzaSyCKeMA-Fsm0RYnZHAJ9k6qlqptAsevLqnk",
   authDomain: "time-capsule-88cf6.firebaseapp.com",
@@ -18,49 +16,11 @@ const firebaseConfig = {
   measurementId: "G-LX6RY9ZCJ5"
 };
 
-// Initialize Firebase
+// Initialize Firebase app (no analytics)
 const app = initializeApp(firebaseConfig);
 
-// Initialize Analytics with error handling
-try {
-  getAnalytics(app);
-} catch (err) {
-  console.warn("Analytics initialization failed:", err);
-}
-
-// Initialize Auth
+// Auth and Firestore exports (simple, stable)
 export const auth = getAuth(app);
-
-// Disable IndexedDB persistence to avoid backing store errors
-if (typeof window !== "undefined" && "indexedDB" in window) {
-  try {
-    // Disable IndexedDB
-    Object.defineProperty(window.indexedDB, "open", {
-      value: function() {
-        throw new Error("IndexedDB disabled for this app");
-      }
-    });
-  } catch (err) {
-    console.warn("Could not disable IndexedDB:", err);
-  }
-}
-
-// Initialize Firestore
 export const db = getFirestore(app);
-
-// Disable Firestore persistence to avoid IndexedDB issues
-try {
-  import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js")
-    .then(module => {
-      if (module.disablePersistence) {
-        module.disablePersistence(db).catch(err => {
-          console.warn("Could not disable Firestore persistence:", err);
-        });
-      }
-    })
-    .catch(err => console.warn("Could not import Firestore module:", err));
-} catch (err) {
-  console.warn("Firestore persistence handling skipped:", err);
-}
 
 export default app;
